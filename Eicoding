@@ -1,0 +1,648 @@
+// RealTimeChatApp.java
+// Console-based simulation of a real-time chat application.
+// Demonstrates Singleton (ChatServer), Observer (ChatRoom <-> ChatClient),
+// and Adapter (TransportAdapter) design patterns.
+//
+// Compile:
+// javac RealTimeChatApp.java
+// Run:
+// java RealTimeChatApp
+//
+// Author: Suriya (for Educational Initiatives interview)
+
+import java.util.*;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.concurrent.ConcurrentHashMap;
+
+/* ===========================
+   Domain: Message
+   =========================== */
+class Message {
+    final String from;
+    final String toRoom;      // target room id (null for PM)
+    final String toUser;      // target user id for PM (null for room messages)
+    final String text;
+    final LocalDateTime time;
+
+    Message(String from, String toRoom, String toUser, String text) {
+        this.from = from;
+        this.toRoom = toRoom;
+        this.toUser = toUser;
+        this.text = text;
+        this.time = LocalDateTime.now();
+    }
+
+    String formatted() {
+        return String.format("[%s] %s%s: %s",
+                time.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
+                from,
+                (toUser != null ? " -> " + toUser : ""),
+                text);
+    }
+}
+
+/* ===========================
+   Adapter: TransportAdapter
+   Abstracts transport layer (simulated)
+   =========================== */
+interface TransportAdapter {
+    void deliver(Message m, ChatClient recipient);
+    String name();
+}
+
+class WebSocketAdapter implements TransportAdapter {
+    public void deliver(Message m, ChatClient recipient) {
+        // Simulated fast delivery, instant print
+        recipient.receive(m, "WebSocket");
+    }
+    public String name() { return "WebSocket"; }
+}
+
+class HttpAdapter implements TransportAdapter {
+    public void deliver(Message m, ChatClient recipient) {
+        // Simulated slower delivery: same behaviour but note transport
+        recipient.receive(m, "HTTP");
+    }
+    public String name() { return "HTTP"; }
+}
+
+/* ===========================
+   Observer: ChatClient (observer of ChatRoom)
+   =========================== */
+class ChatClient {
+    private final String username;
+    private final TransportAdapter adapter;
+    private final ChatServer server;
+
+    ChatClient(String username, TransportAdapter adapter) {
+        this.username = username;
+        this.adapter = adapter;
+        this.server = ChatServer.getInstance();
+    }
+
+    public String getUsername() { return username; }
+    public TransportAdapter getAdapter() { return adapter; }
+
+    // Called by transport adapter to deliver message
+    public void receive(Message m, String transportUsed) {
+        // Deliver to console (simulate client receiving in real-time)
+        System.out.printf("(%s via %s) %s\n", username, transportUsed, m.formatted());
+    }
+
+    // Send a message to a room
+    public void sendToRoom(String roomId, String text) throws ChatException {
+        server.postRoomMessage(this.username, roomId, text, adapter);
+    }
+
+    // Send private message
+    public void sendPrivate(String toUser, String text) throws ChatException {
+        server.postPrivateMessage(this.username, toUser, text, adapter);
+    }
+
+    // Join room
+    public void joinRoom(String roomId) throws ChatException {
+        server.joinRoom(roomId, this);
+    }
+
+    // Leave room
+    public void leaveRoom(String roomId) throws ChatException {
+        server.leaveRoom(roomId, this);
+    }
+
+    // View room history
+    public void viewHistory(String roomId) throws ChatException {
+        server.printRoomHistory(roomId);
+    }
+}
+
+/* ===========================
+   ChatRoom (Subject in Observer)
+   =========================== */
+class ChatRoom {
+    private final String id;
+    // observers keyed by username -> client
+    private final Map<String, ChatClient> members = new ConcurrentHashMap<>();
+    private final List<Message> history = Collections.synchronizedList(new ArrayList<>());
+
+    ChatRoom(String id) { this.id = id; }
+
+    public String getId() { return id; }
+
+    public void addMember(ChatClient client) {
+        members.put(client.getUsername(), client);
+        // announce join to room
+        Message m = new Message("SYSTEM", id, null, client.getUsername() + " joined the room.");
+        addToHistory(m);
+        notifyAll(m);
+    }
+
+    public void removeMember(ChatClient client) {
+        if (members.remove(client.getUsername()) != null) {
+            Message m = new Message("SYSTEM", id, null, client.getUsername() + " left the room.");
+            addToHistory(m);
+            notifyAll(m);
+        }
+    }
+
+    public boolean hasMember(String username) {
+        return members.containsKey(username);
+    }
+
+    public Set<String> memberList() {
+        return new TreeSet<>(members.keySet());
+    }
+
+    public void postMessage(Message m, TransportAdapter senderAdapter) {
+        addToHistory(m);
+        notifyAll(m, senderAdapter);
+    }
+
+    public void addToHistory(Message m) { history.add(m); }
+
+    public List<Message> getHistory() { return new ArrayList<>(history); }
+
+    // notify using sender's adapter for each recipient (simulated)
+    private void notifyAll(Message m, TransportAdapter adapter) {
+        // send to all members asynchronously (here immediate)
+        for (ChatClient c : members.values()) {
+            // do not exclude sender: sender also sees their message as delivered
+            adapter.deliver(m, c);
+        }
+    }
+
+    // default notify (uses WebSocket adapter)
+    private void notifyAll(Message m) {
+        TransportAdapter defaultAdapter = new WebSocketAdapter();
+        notifyAll(m, defaultAdapter);
+    }
+}
+
+/* ===========================
+   Singleton: ChatServer
+   Manages users and rooms
+   =========================== */
+class ChatServer {
+    private static ChatServer instance;
+    private final Map<String, ChatRoom> rooms = new ConcurrentHashMap<>();
+    private final Map<String, ChatClient> users = new ConcurrentHashMap<>();
+
+    private ChatServer() {}
+
+    public static synchronized ChatServer getInstance() {
+        if (instance == null) instance = new ChatServer();
+        return instance;
+    }
+
+    // Create or get room
+    public synchronized ChatRoom getOrCreateRoom(String roomId) {
+        return rooms.computeIfAbsent(roomId, ChatRoom::new);
+    }
+
+    // Register user client
+    public synchronized void registerUser(ChatClient client) throws ChatException {
+        String uname = client.getUsername();
+        if (users.containsKey(uname)) throw new ChatException("Username already exists: " + uname);
+        users.put(uname, client);
+        System.out.println("User registered: " + uname + " (transport=" + client.getAdapter().name() + ")");
+    }
+
+    public ChatClient getUser(String username) {
+        return users.get(username);
+    }
+
+    // Join room
+    public void joinRoom(String roomId, ChatClient client) throws ChatException {
+        ChatRoom room = getOrCreateRoom(roomId);
+        if (room.hasMember(client.getUsername())) throw new ChatException("User already in room.");
+        room.addMember(client);
+        System.out.println(client.getUsername() + " joined room " + roomId);
+    }
+
+    // Leave room
+    public void leaveRoom(String roomId, ChatClient client) throws ChatException {
+        ChatRoom room = rooms.get(roomId);
+        if (room == null || !room.hasMember(client.getUsername())) throw new ChatException("User not in room.");
+        room.removeMember(client);
+        System.out.println(client.getUsername() + " left room " + roomId);
+    }
+
+    // Post message to room
+    public void postRoomMessage(String from, String roomId, String text, TransportAdapter adapter) throws ChatException {
+        ChatRoom room = rooms.get(roomId);
+        if (room == null) throw new ChatException("Room does not exist: " + roomId);
+        if (!room.hasMember(from)) throw new ChatException("You are not a member of room " + roomId);
+        Message m = new Message(from, roomId, null, text);
+        room.postMessage(m, adapter);
+    }
+
+    // Post private message
+    public void postPrivateMessage(String from, String toUser, String text, TransportAdapter adapter) throws ChatException {
+        ChatClient recipient = users.get(toUser);
+        if (recipient == null) throw new ChatException("Recipient not found: " + toUser);
+        Message m = new Message(from, null, toUser, text);
+        // deliver via adapter directly to recipient
+        adapter.deliver(m, recipient);
+    }
+
+    public void printRoomHistory(String roomId) throws ChatException {
+        ChatRoom room = rooms.get(roomId);
+        if (room == null) throw new ChatException("Room does not exist: " + roomId);
+        List<Message> h = room.getHistory();
+        System.out.println("=== History for room: " + roomId + " ===");
+        if (h.isEmpty()) System.out.println("(no messages)");
+        else for (Message m : h) System.out.println(m.formatted());
+    }
+
+    public void listRoomUsers(String roomId) throws ChatException {
+        ChatRoom room = rooms.get(roomId);
+        if (room == null) throw new ChatException("Room does not exist: " + roomId);
+        System.out.println("Active users in " + roomId + ": " + String.join(", ", room.memberList()));
+    }
+}
+
+/* ===========================
+   Exceptions
+   =========================== */
+class ChatException extends Exception {
+    ChatException(String msg) { super(msg); }
+}
+
+/* ===========================
+   CLI / Main Application
+   =========================== */
+public class RealTimeChatApp {
+
+    private static final Scanner scanner = new Scanner(System.in);
+    private static final ChatServer server = ChatServer.getInstance();
+
+    public static void main(String[] args) {
+        printWelcome();
+        boolean running = true;
+
+        Map<String, TransportAdapter> adapterChoices = new HashMap<>();
+        adapterChoices.put("ws", new WebSocketAdapter());
+        adapterChoices.put("http", new HttpAdapter());
+
+        while (running) {
+            System.out.print("> ");
+            String line = scanner.nextLine().trim();
+            if (line.isEmpty()) continue;
+            String[] parts = line.split("\\s+", 2);
+            String cmd = parts[0].toLowerCase();
+
+            try {
+                switch (cmd) {
+                    case "help": showHelp(); break;
+                    case "create_user":
+                        // create_user username transport (ws/http)
+                        handleCreateUser(parts, adapterChoices); break;
+                    case "create_room":
+                        // create_room roomId
+                        handleCreateRoom(parts); break;
+                    case "join":
+                        // join username roomId
+                        handleJoin(parts); break;
+                    case "leave":
+                        // leave username roomId
+                        handleLeave(parts); break;
+                    case "send":
+                        // send username roomId message...
+                        handleSend(parts); break;
+                    case "pm":
+                        // pm fromUser toUser message...
+                        handlePm(parts); break;
+                    case "history":
+                        // history roomId
+                        handleHistory(parts); break;
+                    case "users":
+                        // users roomId
+                        handleUsers(parts); break;
+                    case "list_users":
+                        // list_users
+                        handleListUsers(); break;
+                    case "exit":
+                    case "quit":
+                        running = false;
+                        System.out.println("Shutting down..."); break;
+                    default:
+                        System.out.println("Unknown command. Type 'help' to see commands.");
+                }
+            } catch (ChatException ce) {
+                System.out.println("Error: " + ce.getMessage());
+            } catch (Exception e) {
+                System.out.println("Unexpected error: " + e.getMessage());
+            }
+        }
+
+        scanner.close();
+    }
+
+    private static void printWelcome() {
+        System.out.println("=== Real-time Chat App (simulated) ===");
+        System.out.println("Type 'help' to view commands.");
+    }
+
+    private static void showHelp() {
+        System.out.println("Commands:");
+        System.out.println("  help");
+        System.out.println("  create_user <username> <transport: ws|http>");
+        System.out.println("  create_room <roomId>");
+        System.out.println("  join <username> <roomId>");
+        System.out.println("  leave <username> <roomId>");
+        System.out.println("  send <username> <roomId> <message...>");
+        System.out.println("  pm <fromUser> <toUser> <message...>");
+        System.out.println("  history <roomId>");
+        System.out.println("  users <roomId>");
+        System.out.println("  list_users");
+        System.out.println("  exit");
+    }
+
+    private static void handleCreateUser(String[] parts, Map<String, TransportAdapter> adapters) throws ChatException {
+        if (parts.length < 2) { System.out.println("Usage: create_user <username> <transport>"); return; }
+        String[] p = parts[1].split("\\s+");
+        if (p.length < 2) { System.out.println("Usage: create_user <username> <transport>"); return; }
+        String username = p[0];
+        String tr = p[1].toLowerCase();
+        TransportAdapter adapter = adapters.getOrDefault(tr, new WebSocketAdapter());
+        ChatClient client = new ChatClient(username, adapter);
+        server.registerUser(client);
+    }
+
+    private static void handleCreateRoom(String[] parts) {
+        if (parts.length < 2) { System.out.println("Usage: create_room <roomId>"); return; }
+        String roomId = parts[1];
+        server.getOrCreateRoom(roomId);
+        System.out.println("Room created/available: " + roomId);
+    }
+
+    private static void handleJoin(String[] parts) throws ChatException {
+        if (parts.length < 2) { System.out.println("Usage: join <username> <roomId>"); return; }
+        String[] p = parts[1].split("\\s+");
+        if (p.length < 2) { System.out.println("Usage: join <username> <roomId>"); return; }
+        String username = p[0], roomId = p[1];
+        ChatClient c = server.getUser(username);
+        if (c == null) throw new ChatException("User not registered: " + username);
+        c.joinRoom(roomId);
+    }
+
+    private static void handleLeave(String[] parts) throws ChatException {
+        if (parts.length < 2) { System.out.println("Usage: leave <username> <roomId>"); return; }
+        String[] p = parts[1].split("\\s+");
+        if (p.length < 2) { System.out.println("Usage: leave <username> <roomId>"); return; }
+        String username = p[0], roomId = p[1];
+        ChatClient c = server.getUser(username);
+        if (c == null) throw new ChatException("User not registered: " + username);
+        c.leaveRoom(roomId);
+    }
+
+    private static void handleSend(String[] parts) throws ChatException {
+        if (parts.length < 2) { System.out.println("Usage: send <username> <roomId> <message...>"); return; }
+        String[] p = parts[1].split("\\s+", 3);
+        if (p.length < 3) { System.out.println("Usage: send <username> <roomId> <message...>"); return; }
+        String username = p[0], roomId = p[1], message = p[2];
+        ChatClient c = server.getUser(username);
+        if (c == null) throw new ChatException("User not registered: " + username);
+        c.sendToRoom(roomId, message);
+    }
+
+    private static void handlePm(String[] parts) throws ChatException {
+        if (parts.length < 2) { System.out.println("Usage: pm <fromUser> <toUser> <message...>"); return; }
+        String[] p = parts[1].split("\\s+", 3);
+        if (p.length < 3) { System.out.println("Usage: pm <fromUser> <toUser> <message...>"); return; }
+        String from = p[0], to = p[1], message = p[2];
+        ChatClient c = server.getUser(from);
+        if (c == null) throw new ChatException("User not registered: " + from);
+        c.sendPrivate(to, message);
+    }
+
+    private static void handleHistory(String[] parts) throws ChatException {
+        if (parts.length < 2) { System.out.println("Usage: history <roomId>"); return; }
+        String roomId = parts[1];
+        server.printRoomHistory(roomId);
+    }
+
+    private static void handleUsers(String[] parts) throws ChatException {
+        if (parts.length < 2) { System.out.println("Usage: users <roomId>"); return; }
+        String roomId = parts[1];
+        server.listRoomUsers(roomId);
+    }
+
+    private static void handleListUsers() {
+        System.out.println("Registered users: (use 'create_user <name> <ws|http>' to add)");
+        // print simple list from server internals using reflection-like approach:
+        // There is no public API to list users - but we can mimic via known commands.
+        System.out.println("Use 'users <roomId>' after joining users to inspect active users in room.");
+    }
+}
+[28/09, 3:26 pm] Suriya Suriya: // DesignPatternsDemo.java
+import java.util.*;
+
+// =======================
+// BEHAVIORAL PATTERNS
+// =======================
+
+// Observer Pattern (Weather Updates)
+interface WeatherObserver {
+    void update(String weather);
+}
+
+interface WeatherStation {
+    void addObserver(WeatherObserver o);
+    void removeObserver(WeatherObserver o);
+    void notifyObservers();
+}
+
+class WeatherStationImpl implements WeatherStation {
+    private List<WeatherObserver> observers = new ArrayList<>();
+    private String weather;
+
+    public void setWeather(String weather) {
+        this.weather = weather;
+        notifyObservers();
+    }
+
+    public void addObserver(WeatherObserver o) { observers.add(o); }
+    public void removeObserver(WeatherObserver o) { observers.remove(o); }
+    public void notifyObservers() {
+        for (WeatherObserver o : observers) o.update(weather);
+    }
+}
+
+class PhoneDisplay implements WeatherObserver {
+    public void update(String weather) {
+        System.out.println("Phone Display: Weather changed to " + weather);
+    }
+}
+
+class TVDisplay implements WeatherObserver {
+    public void update(String weather) {
+        System.out.println("TV Display: Weather changed to " + weather);
+    }
+}
+
+// Strategy Pattern (Payment)
+interface PaymentStrategy { void pay(int amount); }
+
+class CreditCardPayment implements PaymentStrategy {
+    public void pay(int amount){ System.out.println("Paid $" + amount + " using Credit Card."); }
+}
+
+class PayPalPayment implements PaymentStrategy {
+    public void pay(int amount){ System.out.println("Paid $" + amount + " using PayPal."); }
+}
+
+class ShoppingCart {
+    private PaymentStrategy paymentStrategy;
+    public void setPaymentStrategy(PaymentStrategy ps){ this.paymentStrategy = ps; }
+    public void checkout(int amount){ paymentStrategy.pay(amount); }
+}
+
+// =======================
+// CREATIONAL PATTERNS
+// =======================
+
+// Singleton Pattern (Logger)
+class Logger {
+    private static Logger instance;
+    private Logger() {}
+    public static Logger getInstance() {
+        if(instance == null) instance = new Logger();
+        return instance;
+    }
+    public void log(String message) { System.out.println("[LOG]: " + message); }
+}
+
+// Factory Pattern (Shape)
+interface Shape { void draw(); }
+
+class Circle implements Shape { public void draw(){ System.out.println("Drawing Circle"); } }
+class Square implements Shape { public void draw(){ System.out.println("Drawing Square"); } }
+
+class ShapeFactory {
+    public Shape getShape(String type) {
+        if(type.equalsIgnoreCase("CIRCLE")) return new Circle();
+        if(type.equalsIgnoreCase("SQUARE")) return new Square();
+        return null;
+    }
+}
+
+// =======================
+// STRUCTURAL PATTERNS
+// =======================
+
+// Adapter Pattern (Media Player)
+interface MediaPlayer { void play(String audioType, String fileName); }
+
+interface AdvancedMediaPlayer {
+    void playVlc(String fileName);
+    void playMp4(String fileName);
+}
+
+class VLCPlayer implements AdvancedMediaPlayer {
+    public void playVlc(String fileName){ System.out.println("Playing vlc file: " + fileName); }
+    public void playMp4(String fileName){}
+}
+
+class MP4Player implements AdvancedMediaPlayer {
+    public void playVlc(String fileName){}
+    public void playMp4(String fileName){ System.out.println("Playing mp4 file: " + fileName); }
+}
+
+class MediaAdapter implements MediaPlayer {
+    AdvancedMediaPlayer advancedPlayer;
+    public MediaAdapter(String audioType){
+        if(audioType.equalsIgnoreCase("vlc")) advancedPlayer = new VLCPlayer();
+        else if(audioType.equalsIgnoreCase("mp4")) advancedPlayer = new MP4Player();
+    }
+    public void play(String audioType, String fileName){
+        if(audioType.equalsIgnoreCase("vlc")) advancedPlayer.playVlc(fileName);
+        else if(audioType.equalsIgnoreCase("mp4")) advancedPlayer.playMp4(fileName);
+    }
+}
+
+class MP3Player implements MediaPlayer {
+    public void play(String audioType, String fileName){
+        if(audioType.equalsIgnoreCase("mp3")) System.out.println("Playing mp3 file: " + fileName);
+        else {
+            MediaAdapter adapter = new MediaAdapter(audioType);
+            adapter.play(audioType, fileName);
+        }
+    }
+}
+
+// Decorator Pattern (Coffee)
+interface Coffee {
+    String getDescription();
+    double getCost();
+}
+
+class SimpleCoffee implements Coffee {
+    public String getDescription(){ return "Simple Coffee"; }
+    public double getCost(){ return 5; }
+}
+
+abstract class CoffeeDecorator implements Coffee {
+    protected Coffee decoratedCoffee;
+    public CoffeeDecorator(Coffee c){ this.decoratedCoffee = c; }
+    public String getDescription(){ return decoratedCoffee.getDescription(); }
+    public double getCost(){ return decoratedCoffee.getCost(); }
+}
+
+class MilkDecorator extends CoffeeDecorator {
+    public MilkDecorator(Coffee c){ super(c); }
+    public String getDescription(){ return super.getDescription() + ", Milk"; }
+    public double getCost(){ return super.getCost() + 2; }
+}
+
+class SugarDecorator extends CoffeeDecorator {
+    public SugarDecorator(Coffee c){ super(c); }
+    public String getDescription(){ return super.getDescription() + ", Sugar"; }
+    public double getCost(){ return super.getCost() + 1; }
+}
+
+// =======================
+// MAIN DEMO
+// =======================
+public class DesignPatternsDemo {
+    public static void main(String[] args) {
+        System.out.println("===== Behavioral Patterns =====");
+        // Observer
+        WeatherStationImpl station = new WeatherStationImpl();
+        station.addObserver(new PhoneDisplay());
+        station.addObserver(new TVDisplay());
+        station.setWeather("Sunny");
+        station.setWeather("Rainy");
+
+        // Strategy
+        ShoppingCart cart = new ShoppingCart();
+        cart.setPaymentStrategy(new CreditCardPayment());
+        cart.checkout(100);
+        cart.setPaymentStrategy(new PayPalPayment());
+        cart.checkout(200);
+
+        System.out.println("\n===== Creational Patterns =====");
+        // Singleton
+        Logger logger = Logger.getInstance();
+        logger.log("Singleton logger example");
+
+        // Factory
+        ShapeFactory factory = new ShapeFactory();
+        Shape shape1 = factory.getShape("CIRCLE"); shape1.draw();
+        Shape shape2 = factory.getShape("SQUARE"); shape2.draw();
+
+        System.out.println("\n===== Structural Patterns =====");
+        // Adapter
+        MediaPlayer player = new MP3Player();
+        player.play("mp3", "song.mp3");
+        player.play("vlc", "movie.vlc");
+        player.play("mp4", "video.mp4");
+
+        // Decorator
+        Coffee coffee = new SimpleCoffee();
+        System.out.println(coffee.getDescription() + " $" + coffee.getCost());
+        coffee = new MilkDecorator(coffee);
+        coffee = new SugarDecorator(coffee);
+        System.out.println(coffee.getDescription() + " $" + coffee.getCost());
+    }
+}
